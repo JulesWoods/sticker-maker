@@ -93,6 +93,34 @@
   .card .row button { flex: 1; padding: 0 8px; }
   .actions { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 4px; }
   footer { margin-top: 20px; font-size: 13px; color: var(--muted); }
+  .card .row button.small { flex: 0 0 auto; min-width: 64px; }
+  .editor {
+    position: fixed; inset: 0; z-index: 10; background: var(--bg);
+    display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top);
+  }
+  .editor .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; }
+  .editor .layers {
+    position: relative; border-radius: 8px; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    background-color: var(--check-b);
+    background-image:
+      linear-gradient(45deg, var(--check-a) 25%, transparent 25%, transparent 75%, var(--check-a) 75%),
+      linear-gradient(45deg, var(--check-a) 25%, transparent 25%, transparent 75%, var(--check-a) 75%);
+    background-size: 20px 20px; background-position: 0 0, 10px 10px;
+  }
+  .editor .layers canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  .editor .tools {
+    padding: 8px 16px calc(10px + env(safe-area-inset-bottom));
+    display: grid; gap: 8px; background: var(--card); border-top: 1px solid var(--line);
+  }
+  .editor .tools .row { display: flex; gap: 8px; }
+  .editor .tools .row > * { flex: 1; }
+  .editor button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .sizeRow { display: flex; align-items: center; gap: 12px; min-height: 48px; }
+  .sizeRow input[type=range] { flex: 1; min-height: 48px; margin: 0; }
+  .dot { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; flex: 0 0 48px; }
+  .dot span { display: block; border-radius: 50%; background: var(--text); opacity: .6; }
 </style>
 </head>
 <body>
@@ -124,8 +152,33 @@
 </div>
 
 <footer>
-  WhatsApp stickers are 512 x 512 WebP files under 100 KB, with a 96 x 96 PNG tray icon. The pack zip contains those files.
+  Tap Edit on a cutout to erase or restore parts with your finger. WhatsApp stickers are 512 x 512 WebP files under 100 KB, with a 96 x 96 PNG tray icon. The pack zip contains those files.
 </footer>
+
+<div class="editor hidden" id="editor" role="dialog" aria-label="Edit cutout">
+  <div class="stage" id="stage">
+    <div class="layers" id="layers">
+      <canvas id="bgCanvas"></canvas>
+      <canvas id="workCanvas"></canvas>
+    </div>
+  </div>
+  <div class="tools">
+    <div class="row">
+      <button id="modeErase" aria-pressed="true">Erase</button>
+      <button id="modeRestore" aria-pressed="false">Restore</button>
+      <button id="undoBtn" disabled>Undo</button>
+    </div>
+    <div class="sizeRow">
+      <span class="muted" style="font-size:14px">Brush</span>
+      <input id="brushSize" type="range" min="6" max="160" step="2" value="36" aria-label="Brush size">
+      <div class="dot"><span id="brushDot"></span></div>
+    </div>
+    <div class="row">
+      <button id="cancelEdit">Cancel</button>
+      <button class="primary" id="doneEdit">Done</button>
+    </div>
+  </div>
+</div>
 
 <script type="module">
 // Pinned libraries. Loaded on first use so the page itself opens instantly.
@@ -324,20 +377,24 @@ async function processFile(file, index, count) {
 
   setStatus('Trimming ' + label, '');
   const outC = await blobToCanvas(outBlob);
-  const outCtx = outC.getContext('2d');
-  const px = outCtx.getImageData(0, 0, outC.width, outC.height);
+  const outputs = await finishFromCutout(outC, () => setStatus('Making sticker ' + label, ''));
+  if (!outputs) throw new Error('Nothing was detected in ' + file.name);
+  return { name: safeName(file.name), srcPng: input, cutPng: outBlob, ...outputs };
+}
+
+// From a full-size cutout canvas (transparent background): trim, pad, PNG, sticker.
+async function finishFromCutout(outC, beforeSticker) {
+  const px = outC.getContext('2d').getImageData(0, 0, outC.width, outC.height);
   const box = alphaBounds(px.data, outC.width, outC.height, 8);
-  if (!box) throw new Error('Nothing was detected in ' + file.name);
+  if (!box) return null;
   const pad = padBox(box, MARGIN);
   const cut = document.createElement('canvas');
   cut.width = pad.w; cut.height = pad.h;
   cut.getContext('2d').drawImage(outC, box.x, box.y, box.w, box.h, pad.m, pad.m, box.w, box.h);
   const png = await toBlob(cut, 'image/png');
-
-  setStatus('Making sticker ' + label, '');
+  if (beforeSticker) beforeSticker();
   const st = await makeSticker(cut);
-
-  return { name: safeName(file.name), png, pngUrl: URL.createObjectURL(png), webp: st.webp, webpQuality: st.quality, webpTooBig: st.tooBig, sticker: st.canvas };
+  return { png, pngUrl: URL.createObjectURL(png), webp: st.webp, webpQuality: st.quality, webpTooBig: st.tooBig, sticker: st.canvas };
 }
 
 function download(blob, filename) {
@@ -361,11 +418,13 @@ function render() {
     meta.textContent = `PNG ${fmtKB(it.png.size)}, sticker ${fmtKB(it.webp.size)}` + (it.webpTooBig ? ' (over 100 KB, may be rejected)' : '');
     if (it.webpTooBig) meta.style.color = 'var(--warn-text)';
     const row = document.createElement('div'); row.className = 'row';
+    const b0 = document.createElement('button'); b0.textContent = 'Edit'; b0.className = 'small';
+    b0.onclick = () => openEditor(i);
     const b1 = document.createElement('button'); b1.textContent = 'PNG';
     b1.onclick = () => download(it.png, it.name + '.png');
     const b2 = document.createElement('button'); b2.textContent = 'Sticker';
     b2.onclick = () => download(it.webp, `sticker-${String(i + 1).padStart(2, '0')}.webp`);
-    row.append(b1, b2);
+    row.append(b0, b1, b2);
     card.append(pv, nm, meta, row);
     results.appendChild(card);
   });
@@ -423,6 +482,158 @@ clearBtn.onclick = () => {
   errors.innerHTML = '';
   statusPanel.classList.add('hidden');
   render();
+};
+
+// ---- Brush editor: erase and restore on the full-size cutout ----
+const editor = $('editor'), stage = $('stage'), layers = $('layers');
+const bgCanvas = $('bgCanvas'), workCanvas = $('workCanvas');
+const modeErase = $('modeErase'), modeRestore = $('modeRestore'), undoBtn = $('undoBtn');
+const brushSize = $('brushSize'), brushDot = $('brushDot');
+const cancelEdit = $('cancelEdit'), doneEdit = $('doneEdit');
+const ed = { index: -1, orig: null, scratch: null, scratch2: null, undo: [], mode: 'erase', drawing: false, last: null };
+const UNDO_MAX = 8;
+
+function setMode(m) {
+  ed.mode = m;
+  modeErase.setAttribute('aria-pressed', String(m === 'erase'));
+  modeRestore.setAttribute('aria-pressed', String(m === 'restore'));
+}
+modeErase.onclick = () => setMode('erase');
+modeRestore.onclick = () => setMode('restore');
+
+function layoutEditor() {
+  if (ed.index < 0) return;
+  const w = workCanvas.width, h = workCanvas.height;
+  const availW = stage.clientWidth - 16, availH = stage.clientHeight - 16;
+  const s = Math.min(availW / w, availH / h);
+  layers.style.width = Math.floor(w * s) + 'px';
+  layers.style.height = Math.floor(h * s) + 'px';
+  updateDot();
+}
+function updateDot() {
+  const rect = layers.getBoundingClientRect();
+  const scale = rect.width / (workCanvas.width || 1);
+  const d = Math.max(4, Math.min(48, Number(brushSize.value) * scale));
+  brushDot.style.width = d + 'px'; brushDot.style.height = d + 'px';
+}
+brushSize.oninput = updateDot;
+window.addEventListener('resize', layoutEditor);
+
+function mkCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+async function openEditor(i) {
+  const it = items[i];
+  const orig = await blobToCanvas(it.srcPng);
+  const cut = await blobToCanvas(it.cutPng);
+  const w = cut.width, h = cut.height;
+  ed.index = i; ed.orig = orig; ed.undo = []; ed.drawing = false;
+  ed.scratch = mkCanvas(w, h); ed.scratch2 = mkCanvas(w, h);
+  bgCanvas.width = w; bgCanvas.height = h;
+  const bctx = bgCanvas.getContext('2d');
+  bctx.globalAlpha = 0.35; bctx.drawImage(orig, 0, 0, w, h); bctx.globalAlpha = 1;
+  workCanvas.width = w; workCanvas.height = h;
+  workCanvas.getContext('2d').drawImage(cut, 0, 0);
+  undoBtn.disabled = true;
+  setMode('erase');
+  editor.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  layoutEditor();
+}
+function closeEditor() {
+  editor.classList.add('hidden');
+  document.body.style.overflow = '';
+  ed.index = -1; ed.orig = null; ed.scratch = null; ed.scratch2 = null; ed.undo = [];
+}
+
+function canvasPoint(e) {
+  const r = workCanvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * workCanvas.width / r.width, y: (e.clientY - r.top) * workCanvas.height / r.height };
+}
+function pushUndo() {
+  const ctx = workCanvas.getContext('2d');
+  ed.undo.push(ctx.getImageData(0, 0, workCanvas.width, workCanvas.height));
+  if (ed.undo.length > UNDO_MAX) ed.undo.shift();
+  undoBtn.disabled = false;
+}
+undoBtn.onclick = () => {
+  const img = ed.undo.pop();
+  if (img) workCanvas.getContext('2d').putImageData(img, 0, 0);
+  undoBtn.disabled = ed.undo.length === 0;
+};
+
+function paintSegment(a, b) {
+  const w = workCanvas.width, h = workCanvas.height;
+  const size = Number(brushSize.value);
+  const sctx = ed.scratch.getContext('2d');
+  sctx.clearRect(0, 0, w, h);
+  sctx.lineWidth = size; sctx.lineCap = 'round'; sctx.lineJoin = 'round'; sctx.strokeStyle = '#fff'; sctx.fillStyle = '#fff';
+  if (a.x === b.x && a.y === b.y) {
+    sctx.beginPath(); sctx.arc(a.x, a.y, size / 2, 0, Math.PI * 2); sctx.fill();
+  } else {
+    sctx.beginPath(); sctx.moveTo(a.x, a.y); sctx.lineTo(b.x, b.y); sctx.stroke();
+  }
+  const wctx = workCanvas.getContext('2d');
+  if (ed.mode === 'erase') {
+    wctx.globalCompositeOperation = 'destination-out';
+    wctx.drawImage(ed.scratch, 0, 0);
+    wctx.globalCompositeOperation = 'source-over';
+  } else {
+    const s2 = ed.scratch2.getContext('2d');
+    s2.globalCompositeOperation = 'source-over';
+    s2.clearRect(0, 0, w, h);
+    s2.drawImage(ed.orig, 0, 0, w, h);
+    s2.globalCompositeOperation = 'destination-in';
+    s2.drawImage(ed.scratch, 0, 0);
+    s2.globalCompositeOperation = 'source-over';
+    wctx.drawImage(ed.scratch2, 0, 0);
+  }
+}
+
+workCanvas.addEventListener('pointerdown', (e) => {
+  if (ed.index < 0 || !e.isPrimary) return;
+  e.preventDefault();
+  try { workCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+  pushUndo();
+  ed.drawing = true;
+  ed.last = canvasPoint(e);
+  paintSegment(ed.last, ed.last);
+});
+workCanvas.addEventListener('pointermove', (e) => {
+  if (!ed.drawing || !e.isPrimary) return;
+  e.preventDefault();
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ce of evs.length ? evs : [e]) {
+    const p = canvasPoint(ce);
+    paintSegment(ed.last, p);
+    ed.last = p;
+  }
+});
+const endStroke = (e) => { if (ed.drawing) { ed.drawing = false; ed.last = null; } };
+workCanvas.addEventListener('pointerup', endStroke);
+workCanvas.addEventListener('pointercancel', endStroke);
+workCanvas.addEventListener('lostpointercapture', endStroke);
+// Belt and braces for older touch handling: never scroll while touching the canvas.
+layers.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+cancelEdit.onclick = closeEditor;
+doneEdit.onclick = async () => {
+  if (ed.index < 0) return;
+  doneEdit.disabled = true; cancelEdit.disabled = true;
+  try {
+    const it = items[ed.index];
+    const newCut = await toBlob(workCanvas, 'image/png');
+    const outputs = await finishFromCutout(workCanvas);
+    if (!outputs) { showError('The cutout is empty. Restore some of it or cancel.'); return; }
+    URL.revokeObjectURL(it.pngUrl);
+    Object.assign(it, { cutPng: newCut, ...outputs });
+    render();
+    closeEditor();
+  } catch (e) {
+    console.error(e);
+    showError('Could not save the edit: ' + (e.message || e));
+  } finally {
+    doneEdit.disabled = false; cancelEdit.disabled = false;
+  }
 };
 
 picker.addEventListener('change', async () => {
