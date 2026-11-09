@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Sticker Maker</title>
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --card: #ffffff;
+    --text: #1b1b1b;
+    --muted: #666;
+    --line: #dcdcd8;
+    --accent: #0b6e4f;
+    --accent-text: #ffffff;
+    --warn-bg: #fff4d6;
+    --warn-text: #6b4b00;
+    --err-bg: #fde3e1;
+    --err-text: #8a1c14;
+    --check-a: #e6e6e6;
+    --check-b: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141414;
+      --card: #1f1f1f;
+      --text: #ededed;
+      --muted: #a3a3a3;
+      --line: #333;
+      --accent: #3ab88a;
+      --accent-text: #0b1a14;
+      --warn-bg: #3a2e0a;
+      --warn-text: #ffd978;
+      --err-bg: #3c1512;
+      --err-text: #ff9f97;
+      --check-a: #2a2a2a;
+      --check-b: #383838;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 24px; margin: 8px 0 4px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  button, .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: 48px; padding: 0 18px;
+    border-radius: 12px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text);
+    font: inherit; font-weight: 600; cursor: pointer;
+    text-decoration: none; -webkit-tap-highlight-color: transparent;
+  }
+  button:disabled, .btn[aria-disabled="true"] { opacity: .45; cursor: default; }
+  .primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .wide { width: 100%; margin-top: 10px; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px; margin: 14px 0;
+  }
+  .hidden { display: none !important; }
+  .status { font-weight: 600; }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .bar > div { height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
+  .notice { padding: 10px 12px; border-radius: 10px; font-size: 14px; margin-top: 10px; }
+  .warn { background: var(--warn-bg); color: var(--warn-text); }
+  .err { background: var(--err-bg); color: var(--err-text); }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 480px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px; }
+  .preview {
+    width: 100%; aspect-ratio: 1 / 1; border-radius: 10px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background-color: var(--check-b);
+    background-image:
+      linear-gradient(45deg, var(--check-a) 25%, transparent 25%, transparent 75%, var(--check-a) 75%),
+      linear-gradient(45deg, var(--check-a) 25%, transparent 25%, transparent 75%, var(--check-a) 75%);
+    background-size: 20px 20px; background-position: 0 0, 10px 10px;
+  }
+  .preview img { max-width: 92%; max-height: 92%; object-fit: contain; }
+  .card .name { font-weight: 600; font-size: 14px; margin: 8px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta { font-size: 13px; color: var(--muted); min-height: 18px; }
+  .card .row { display: flex; gap: 8px; margin-top: 8px; }
+  .card .row button { flex: 1; padding: 0 8px; }
+  .actions { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 4px; }
+  footer { margin-top: 20px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Sticker Maker</h1>
+<p class="muted">Pick photos. Get transparent PNG cutouts and WhatsApp sticker files. Everything runs on this device. Photos are not uploaded anywhere.</p>
+
+<label class="btn primary wide" for="picker" id="pickLabel">Pick photos</label>
+<input id="picker" type="file" accept="image/*" multiple>
+
+<div class="panel hidden" id="statusPanel">
+  <div class="status" id="statusText"></div>
+  <div class="muted" id="statusSub"></div>
+  <div class="bar"><div id="barFill"></div></div>
+  <div class="notice warn hidden" id="firstRunNote">
+    First run: the cutout model is downloaded once (about 55 MB). It is cached, so later runs start right away. Keep this page open.
+  </div>
+</div>
+
+<div id="errors"></div>
+
+<div class="grid" id="results"></div>
+
+<div class="actions hidden" id="actions">
+  <button class="wide" id="zipPng">Download all PNGs (zip)</button>
+  <button class="wide primary" id="zipPack">WhatsApp pack (zip)</button>
+  <div class="muted" id="packHint" style="margin-top:6px"></div>
+  <button class="wide" id="clearBtn">Clear</button>
+</div>
+
+<footer>
+  WhatsApp stickers are 512 x 512 WebP files under 100 KB, with a 96 x 96 PNG tray icon. The pack zip contains those files.
+</footer>
+
+<script type="module">
+// Pinned libraries. Loaded on first use so the page itself opens instantly.
+const BG_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
+const FFLATE_URL = 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js';
+// Only used when the browser cannot encode WebP from a canvas (iOS Safari).
+const WEBP_URL = 'https://cdn.jsdelivr.net/npm/@jsquash/webp@1.5.0/encode.js/+esm';
+const WEBP_CODEC_BASE = 'https://cdn.jsdelivr.net/npm/@jsquash/webp@1.5.0/codec/enc/';
+
+const MAX_EDGE = 1024;
+const MARGIN = 0.04;
+const STICKER = 512;
+const STICKER_PAD = 16;
+const STICKER_MAX_BYTES = 100000;
+const TRAY = 96;
+const TRAY_MAX_BYTES = 50000;
+const QUALITY_STEPS = [0.92, 0.85, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25];
+const PACK_MIN = 3, PACK_MAX = 30;
+
+// PURE-START (tested with test.mjs)
+function scaleToFit(w, h, maxEdge) {
+  const s = Math.min(1, maxEdge / Math.max(w, h));
+  return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) };
+}
+function alphaBounds(data, w, h, thr) {
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      if (data[row + x * 4 + 3] > thr) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+  return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+function padBox(box, frac) {
+  const m = Math.round(Math.max(box.w, box.h) * frac);
+  return { m, w: box.w + 2 * m, h: box.h + 2 * m };
+}
+function fitCentered(w, h, size, pad) {
+  const inner = size - 2 * pad;
+  const s = inner / Math.max(w, h);
+  const dw = Math.round(w * s), dh = Math.round(h * s);
+  return { x: Math.round((size - dw) / 2), y: Math.round((size - dh) / 2), w: dw, h: dh };
+}
+function safeName(name) {
+  return (name || 'image').replace(/\.[^.]+$/, '').replace(/[^\w\- ]+/g, '_').slice(0, 60) || 'image';
+}
+function fmtKB(bytes) { return (bytes / 1024).toFixed(0) + ' KB'; }
+// PURE-END
+
+const $ = (id) => document.getElementById(id);
+const picker = $('picker'), pickLabel = $('pickLabel');
+const statusPanel = $('statusPanel'), statusText = $('statusText'), statusSub = $('statusSub');
+const barFill = $('barFill'), firstRunNote = $('firstRunNote');
+const results = $('results'), actions = $('actions'), errors = $('errors');
+const zipPngBtn = $('zipPng'), zipPackBtn = $('zipPack'), packHint = $('packHint'), clearBtn = $('clearBtn');
+
+const items = []; // { name, png: Blob, pngUrl, webp: Blob|null, webpQuality, webpTooBig, sticker: canvas }
+let busy = false;
+let removeBackground = null;
+let modelReady = false;
+let fflate = null;
+let webpEncode = null;
+let canvasWebp = null; // null = unknown, true/false after first attempt
+window.__sm = { items, setCanvasWebp: (v) => { canvasWebp = v; } }; // debug hook used by the headless test
+
+function setStatus(main, sub, frac) {
+  statusPanel.classList.remove('hidden');
+  statusText.textContent = main;
+  statusSub.textContent = sub || '';
+  barFill.style.width = frac == null ? '0%' : Math.round(frac * 100) + '%';
+}
+function showError(msg) {
+  const d = document.createElement('div');
+  d.className = 'notice err';
+  d.textContent = msg;
+  errors.appendChild(d);
+}
+
+async function loadModelLib() {
+  if (removeBackground) return;
+  setStatus('Loading cutout library', 'about 1 MB of code');
+  const mod = await import(BG_URL);
+  removeBackground = mod.removeBackground || mod.default;
+  if (typeof removeBackground !== 'function') throw new Error('Cutout library did not load');
+}
+
+const dl = { totals: {}, current: {} };
+function onProgress(key, current, total) {
+  dl.totals[key] = total; dl.current[key] = current;
+  let c = 0, t = 0;
+  for (const k in dl.totals) { c += dl.current[k] || 0; t += dl.totals[k] || 0; }
+  if (t > 0) {
+    const mb = (n) => (n / 1048576).toFixed(0);
+    setStatus('Downloading model (first run only)', `${mb(c)} of ${mb(t)} MB`, c / t);
+  }
+}
+const bgConfig = {
+  model: 'isnet_quint8',
+  device: 'cpu',
+  output: { format: 'image/png', quality: 1, type: 'foreground' },
+  progress: onProgress,
+};
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not decode image'));
+    img.src = src;
+  });
+}
+async function blobToCanvas(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    c.getContext('2d').drawImage(img, 0, 0);
+    return c;
+  } finally { URL.revokeObjectURL(url); }
+}
+function toBlob(canvas, type, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+async function encodeWebp(canvas, quality) {
+  if (canvasWebp !== false) {
+    const b = await toBlob(canvas, 'image/webp', quality);
+    if (b && b.type === 'image/webp') { canvasWebp = true; return b; }
+    canvasWebp = false;
+  }
+  if (!webpEncode) {
+    setStatus('Loading WebP encoder', 'this browser cannot write WebP by itself; about 0.4 MB');
+    const mod = await import(WEBP_URL);
+    await mod.init({ locateFile: (p) => WEBP_CODEC_BASE + p });
+    webpEncode = mod.default;
+  }
+  const ctx = canvas.getContext('2d');
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const buf = await webpEncode(data, { quality: Math.round(quality * 100), alpha_quality: 100, exact: 0 });
+  return new Blob([buf], { type: 'image/webp' });
+}
+
+async function makeSticker(cutout) {
+  const c = document.createElement('canvas');
+  c.width = STICKER; c.height = STICKER;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  const r = fitCentered(cutout.width, cutout.height, STICKER, STICKER_PAD);
+  ctx.drawImage(cutout, r.x, r.y, r.w, r.h);
+  let best = null, bestQ = null;
+  for (const q of QUALITY_STEPS) {
+    const b = await encodeWebp(c, q);
+    best = b; bestQ = q;
+    if (b.size <= STICKER_MAX_BYTES) break;
+  }
+  return { canvas: c, webp: best, quality: bestQ, tooBig: best.size > STICKER_MAX_BYTES };
+}
+
+async function makeTray(stickerCanvas) {
+  const c = document.createElement('canvas');
+  c.width = TRAY; c.height = TRAY;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(stickerCanvas, 0, 0, TRAY, TRAY);
+  const b = await toBlob(c, 'image/png');
+  return { blob: b, tooBig: b.size > TRAY_MAX_BYTES };
+}
+
+async function processFile(file, index, count) {
+  const label = `${index + 1} of ${count}: ${file.name}`;
+  setStatus('Preparing ' + label, 'resizing');
+  const url = URL.createObjectURL(file);
+  let img;
+  try { img = await loadImage(url); } finally { URL.revokeObjectURL(url); }
+  const sz = scaleToFit(img.naturalWidth, img.naturalHeight, MAX_EDGE);
+  const inC = document.createElement('canvas');
+  inC.width = sz.w; inC.height = sz.h;
+  const inCtx = inC.getContext('2d');
+  inCtx.imageSmoothingQuality = 'high';
+  inCtx.drawImage(img, 0, 0, sz.w, sz.h);
+  // The library accepts Blobs; ImageData is not converted correctly in 1.7.0.
+  const input = await toBlob(inC, 'image/png');
+
+  setStatus('Cutting out ' + label, modelReady ? 'this takes a few seconds per photo' : 'first photo also warms up the model');
+  const outBlob = await removeBackground(input, bgConfig);
+  modelReady = true;
+  firstRunNote.classList.add('hidden');
+
+  setStatus('Trimming ' + label, '');
+  const outC = await blobToCanvas(outBlob);
+  const outCtx = outC.getContext('2d');
+  const px = outCtx.getImageData(0, 0, outC.width, outC.height);
+  const box = alphaBounds(px.data, outC.width, outC.height, 8);
+  if (!box) throw new Error('Nothing was detected in ' + file.name);
+  const pad = padBox(box, MARGIN);
+  const cut = document.createElement('canvas');
+  cut.width = pad.w; cut.height = pad.h;
+  cut.getContext('2d').drawImage(outC, box.x, box.y, box.w, box.h, pad.m, pad.m, box.w, box.h);
+  const png = await toBlob(cut, 'image/png');
+
+  setStatus('Making sticker ' + label, '');
+  const st = await makeSticker(cut);
+
+  return { name: safeName(file.name), png, pngUrl: URL.createObjectURL(png), webp: st.webp, webpQuality: st.quality, webpTooBig: st.tooBig, sticker: st.canvas };
+}
+
+function download(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+}
+
+function render() {
+  results.innerHTML = '';
+  items.forEach((it, i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const pv = document.createElement('div'); pv.className = 'preview';
+    const im = document.createElement('img'); im.src = it.pngUrl; im.alt = it.name; pv.appendChild(im);
+    const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = it.name;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.textContent = `PNG ${fmtKB(it.png.size)}, sticker ${fmtKB(it.webp.size)}` + (it.webpTooBig ? ' (over 100 KB, may be rejected)' : '');
+    if (it.webpTooBig) meta.style.color = 'var(--warn-text)';
+    const row = document.createElement('div'); row.className = 'row';
+    const b1 = document.createElement('button'); b1.textContent = 'PNG';
+    b1.onclick = () => download(it.png, it.name + '.png');
+    const b2 = document.createElement('button'); b2.textContent = 'Sticker';
+    b2.onclick = () => download(it.webp, `sticker-${String(i + 1).padStart(2, '0')}.webp`);
+    row.append(b1, b2);
+    card.append(pv, nm, meta, row);
+    results.appendChild(card);
+  });
+  actions.classList.toggle('hidden', items.length === 0);
+  const n = items.length;
+  const packOk = n >= PACK_MIN && n <= PACK_MAX;
+  zipPackBtn.disabled = !packOk;
+  if (n === 0) packHint.textContent = '';
+  else if (n < PACK_MIN) packHint.textContent = `A WhatsApp pack needs at least ${PACK_MIN} stickers. You have ${n}.`;
+  else if (n > PACK_MAX) packHint.textContent = `A WhatsApp pack holds at most ${PACK_MAX} stickers. You have ${n}. Remove some with Clear and pick again.`;
+  else packHint.textContent = `${n} stickers and a tray icon.`;
+}
+
+async function loadZip() {
+  if (!fflate) fflate = await import(FFLATE_URL);
+  return fflate;
+}
+async function blobBytes(blob) { return new Uint8Array(await blob.arrayBuffer()); }
+
+zipPngBtn.onclick = async () => {
+  zipPngBtn.disabled = true;
+  try {
+    const z = await loadZip();
+    const files = {};
+    for (const it of items) {
+      let name = it.name + '.png', k = 2;
+      while (files[name]) name = `${it.name}-${k++}.png`;
+      files[name] = [await blobBytes(it.png), { level: 0 }];
+    }
+    download(new Blob([z.zipSync(files)], { type: 'application/zip' }), 'cutouts.zip');
+  } catch (e) { showError('Zip failed: ' + e.message); }
+  zipPngBtn.disabled = false;
+};
+
+zipPackBtn.onclick = async () => {
+  zipPackBtn.disabled = true;
+  try {
+    const z = await loadZip();
+    const files = {};
+    items.forEach((it, i) => { files[`sticker-${String(i + 1).padStart(2, '0')}.webp`] = it.webp; });
+    for (const k in files) files[k] = [await blobBytes(files[k]), { level: 0 }];
+    const tray = await makeTray(items[0].sticker);
+    if (tray.tooBig) showError('Tray icon is over 50 KB (' + fmtKB(tray.blob.size) + ').');
+    files['tray.png'] = [await blobBytes(tray.blob), { level: 0 }];
+    const over = items.filter((it) => it.webpTooBig).length;
+    if (over) showError(`${over} sticker(s) are over 100 KB and may be rejected by WhatsApp.`);
+    download(new Blob([z.zipSync(files)], { type: 'application/zip' }), 'whatsapp-pack.zip');
+  } catch (e) { showError('Pack failed: ' + e.message); }
+  render();
+};
+
+clearBtn.onclick = () => {
+  for (const it of items) URL.revokeObjectURL(it.pngUrl);
+  items.length = 0;
+  errors.innerHTML = '';
+  statusPanel.classList.add('hidden');
+  render();
+};
+
+picker.addEventListener('change', async () => {
+  const files = Array.from(picker.files || []);
+  picker.value = '';
+  if (!files.length || busy) return;
+  busy = true;
+  pickLabel.setAttribute('aria-disabled', 'true');
+  errors.innerHTML = '';
+  try {
+    if (!modelReady) firstRunNote.classList.remove('hidden');
+    await loadModelLib();
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const it = await processFile(files[i], i, files.length);
+        items.push(it);
+        render();
+      } catch (e) {
+        console.error(e);
+        showError(`${files[i].name}: ${e.message || e}`);
+      }
+    }
+    setStatus(`Done: ${items.length} image${items.length === 1 ? '' : 's'} ready`, '', 1);
+  } catch (e) {
+    console.error(e);
+    setStatus('Could not start', '', 0);
+    showError('Loading failed: ' + (e.message || e) + '. Check the connection and try again.');
+  } finally {
+    busy = false;
+    pickLabel.removeAttribute('aria-disabled');
+    firstRunNote.classList.add('hidden');
+  }
+});
+</script>
+</body>
+</html>
