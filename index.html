@@ -99,10 +99,11 @@
     display: flex; flex-direction: column;
     padding-top: env(safe-area-inset-top);
   }
-  .editor .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; }
+  .editor .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; position: relative; overflow: hidden; touch-action: none; }
   .editor .layers {
     position: relative; border-radius: 8px; overflow: hidden;
     touch-action: none; -webkit-user-select: none; user-select: none;
+    transform-origin: 0 0; will-change: transform;
     background-color: var(--check-b);
     background-image:
       linear-gradient(45deg, var(--check-a) 25%, transparent 25%, transparent 75%, var(--check-a) 75%),
@@ -110,6 +111,7 @@
     background-size: 20px 20px; background-position: 0 0, 10px 10px;
   }
   .editor .layers canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  .editor .layers #outlineCanvas { pointer-events: none; opacity: .85; }
   .editor .tools {
     padding: 8px 16px calc(10px + env(safe-area-inset-bottom));
     display: grid; gap: 8px; background: var(--card); border-top: 1px solid var(--line);
@@ -152,7 +154,7 @@
 </div>
 
 <footer>
-  Tap Edit on a cutout to erase or restore parts with your finger. WhatsApp stickers are 512 x 512 WebP files under 100 KB, with a 96 x 96 PNG tray icon. The pack zip contains those files.
+  Tap Edit on a cutout to erase or restore parts with your finger. Pinch with two fingers to zoom. The red line marks the edge of what will be kept. WhatsApp stickers are 512 x 512 WebP files under 100 KB, with a 96 x 96 PNG tray icon. The pack zip contains those files.
 </footer>
 
 <div class="editor hidden" id="editor" role="dialog" aria-label="Edit cutout">
@@ -160,6 +162,7 @@
     <div class="layers" id="layers">
       <canvas id="bgCanvas"></canvas>
       <canvas id="workCanvas"></canvas>
+      <canvas id="outlineCanvas"></canvas>
     </div>
   </div>
   <div class="tools">
@@ -167,6 +170,7 @@
       <button id="modeErase" aria-pressed="true">Erase</button>
       <button id="modeRestore" aria-pressed="false">Restore</button>
       <button id="undoBtn" disabled>Undo</button>
+      <button id="fitBtn">Fit</button>
     </div>
     <div class="sizeRow">
       <span class="muted" style="font-size:14px">Brush</span>
@@ -486,11 +490,17 @@ clearBtn.onclick = () => {
 
 // ---- Brush editor: erase and restore on the full-size cutout ----
 const editor = $('editor'), stage = $('stage'), layers = $('layers');
-const bgCanvas = $('bgCanvas'), workCanvas = $('workCanvas');
+const bgCanvas = $('bgCanvas'), workCanvas = $('workCanvas'), outlineCanvas = $('outlineCanvas');
+const fitBtn = $('fitBtn');
 const modeErase = $('modeErase'), modeRestore = $('modeRestore'), undoBtn = $('undoBtn');
 const brushSize = $('brushSize'), brushDot = $('brushDot');
 const cancelEdit = $('cancelEdit'), doneEdit = $('doneEdit');
-const ed = { index: -1, orig: null, scratch: null, scratch2: null, undo: [], mode: 'erase', drawing: false, last: null };
+const ed = { index: -1, orig: null, scratch: null, scratch2: null, sil: null, undo: [], mode: 'erase', drawing: false, drawId: null, last: null };
+const view = { s: 1, tx: 0, ty: 0 };
+const ZOOM_MAX = 8;
+const pointers = new Map();
+let pinch = null;
+let outlinePending = false;
 const UNDO_MAX = 8;
 
 function setMode(m) {
@@ -508,7 +518,50 @@ function layoutEditor() {
   const s = Math.min(availW / w, availH / h);
   layers.style.width = Math.floor(w * s) + 'px';
   layers.style.height = Math.floor(h * s) + 'px';
+  applyView();
+}
+function applyView() {
+  const W = layers.offsetWidth, H = layers.offsetHeight;
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  const bx = layers.offsetLeft, by = layers.offsetTop;
+  const bw = W * view.s, bh = H * view.s;
+  // Keep the image centered when it fits, and never let its edge leave the stage when it does not.
+  if (bw <= sw) view.tx = (sw - bw) / 2 - bx; else view.tx = Math.min(-bx, Math.max(sw - bw - bx, view.tx));
+  if (bh <= sh) view.ty = (sh - bh) / 2 - by; else view.ty = Math.min(-by, Math.max(sh - bh - by, view.ty));
+  layers.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.s})`;
+  fitBtn.textContent = view.s > 1.01 ? `Fit (${view.s.toFixed(1)}x)` : 'Fit';
   updateDot();
+  scheduleOutline();
+}
+fitBtn.onclick = () => { view.s = 1; view.tx = 0; view.ty = 0; applyView(); };
+
+// Light red ring around every visible pixel of the cutout, about 2.5 screen px wide at any zoom.
+function scheduleOutline() {
+  if (outlinePending || ed.index < 0) return;
+  outlinePending = true;
+  requestAnimationFrame(() => { outlinePending = false; renderOutline(); });
+}
+function renderOutline() {
+  if (ed.index < 0 || !ed.sil) return;
+  const w = workCanvas.width, h = workCanvas.height;
+  const shown = layers.offsetWidth * view.s || 1;
+  const d = Math.max(1, Math.round(2.5 * w / shown));
+  // Solid red silhouette of every pixel that counts as kept (same threshold as the trim step).
+  const sctx = ed.sil.getContext('2d');
+  const src = workCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const sil = sctx.createImageData(w, h), sd = sil.data;
+  for (let i = 3; i < src.length; i += 4) {
+    if (src[i] > 8) { sd[i - 3] = 255; sd[i - 2] = 70; sd[i - 1] = 70; sd[i] = 255; }
+  }
+  sctx.putImageData(sil, 0, 0);
+  const octx = outlineCanvas.getContext('2d');
+  octx.globalCompositeOperation = 'source-over';
+  octx.clearRect(0, 0, w, h);
+  const k = d * 0.7071;
+  for (const [ox, oy] of [[d, 0], [-d, 0], [0, d], [0, -d], [k, k], [-k, k], [k, -k], [-k, -k]]) octx.drawImage(ed.sil, ox, oy);
+  octx.globalCompositeOperation = 'destination-out';
+  octx.drawImage(ed.sil, 0, 0);
+  octx.globalCompositeOperation = 'source-over';
 }
 function updateDot() {
   const rect = layers.getBoundingClientRect();
@@ -527,7 +580,9 @@ async function openEditor(i) {
   const cut = await blobToCanvas(it.cutPng);
   const w = cut.width, h = cut.height;
   ed.index = i; ed.orig = orig; ed.undo = []; ed.drawing = false;
-  ed.scratch = mkCanvas(w, h); ed.scratch2 = mkCanvas(w, h);
+  ed.scratch = mkCanvas(w, h); ed.scratch2 = mkCanvas(w, h); ed.sil = mkCanvas(w, h);
+  outlineCanvas.width = w; outlineCanvas.height = h;
+  view.s = 1; view.tx = 0; view.ty = 0; pointers.clear(); pinch = null;
   bgCanvas.width = w; bgCanvas.height = h;
   const bctx = bgCanvas.getContext('2d');
   bctx.globalAlpha = 0.35; bctx.drawImage(orig, 0, 0, w, h); bctx.globalAlpha = 1;
@@ -542,7 +597,8 @@ async function openEditor(i) {
 function closeEditor() {
   editor.classList.add('hidden');
   document.body.style.overflow = '';
-  ed.index = -1; ed.orig = null; ed.scratch = null; ed.scratch2 = null; ed.undo = [];
+  ed.index = -1; ed.orig = null; ed.scratch = null; ed.scratch2 = null; ed.sil = null; ed.undo = [];
+  layers.style.transform = '';
 }
 
 function canvasPoint(e) {
@@ -559,6 +615,7 @@ undoBtn.onclick = () => {
   const img = ed.undo.pop();
   if (img) workCanvas.getContext('2d').putImageData(img, 0, 0);
   undoBtn.disabled = ed.undo.length === 0;
+  scheduleOutline();
 };
 
 function paintSegment(a, b) {
@@ -589,31 +646,77 @@ function paintSegment(a, b) {
   }
 }
 
-workCanvas.addEventListener('pointerdown', (e) => {
-  if (ed.index < 0 || !e.isPrimary) return;
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function mid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+function revertStroke() {
+  const img = ed.undo.pop();
+  if (img) workCanvas.getContext('2d').putImageData(img, 0, 0);
+  undoBtn.disabled = ed.undo.length === 0;
+  ed.drawing = false; ed.drawId = null; ed.last = null;
+  scheduleOutline();
+}
+function startPinch() {
+  const [a, b] = [...pointers.values()];
+  const sr = stage.getBoundingClientRect();
+  const base = { x: sr.left + layers.offsetLeft, y: sr.top + layers.offsetTop };
+  const m = mid(a, b);
+  pinch = {
+    d0: dist(a, b), s0: view.s,
+    // image-local point (in untransformed layer px) under the fingers' midpoint
+    px: (m.x - base.x - view.tx) / view.s, py: (m.y - base.y - view.ty) / view.s,
+    base,
+  };
+}
+function movePinch() {
+  const [a, b] = [...pointers.values()];
+  const m = mid(a, b);
+  view.s = Math.min(ZOOM_MAX, Math.max(1, pinch.s0 * dist(a, b) / pinch.d0));
+  view.tx = m.x - pinch.base.x - pinch.px * view.s;
+  view.ty = m.y - pinch.base.y - pinch.py * view.s;
+  applyView();
+}
+
+stage.addEventListener('pointerdown', (e) => {
+  if (ed.index < 0) return;
   e.preventDefault();
-  try { workCanvas.setPointerCapture(e.pointerId); } catch (_) {}
-  pushUndo();
-  ed.drawing = true;
-  ed.last = canvasPoint(e);
-  paintSegment(ed.last, ed.last);
+  try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1) {
+    if (e.target !== workCanvas) return; // one finger outside the image does nothing
+    pushUndo();
+    ed.drawing = true; ed.drawId = e.pointerId;
+    ed.last = canvasPoint(e);
+    paintSegment(ed.last, ed.last);
+    scheduleOutline();
+  } else if (pointers.size === 2) {
+    if (ed.drawing) revertStroke(); // a second finger means pinch, not a stroke
+    startPinch();
+  }
 });
-workCanvas.addEventListener('pointermove', (e) => {
-  if (!ed.drawing || !e.isPrimary) return;
+stage.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId)) return;
   e.preventDefault();
-  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size >= 2) { movePinch(); return; }
+  if (!ed.drawing || e.pointerId !== ed.drawId) return;
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ce of evs.length ? evs : [e]) {
     const p = canvasPoint(ce);
     paintSegment(ed.last, p);
     ed.last = p;
   }
+  scheduleOutline();
 });
-const endStroke = (e) => { if (ed.drawing) { ed.drawing = false; ed.last = null; } };
-workCanvas.addEventListener('pointerup', endStroke);
-workCanvas.addEventListener('pointercancel', endStroke);
-workCanvas.addEventListener('lostpointercapture', endStroke);
+const endPointer = (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (ed.drawing && e.pointerId === ed.drawId) { ed.drawing = false; ed.drawId = null; ed.last = null; }
+};
+stage.addEventListener('pointerup', endPointer);
+stage.addEventListener('pointercancel', endPointer);
 // Belt and braces for older touch handling: never scroll while touching the canvas.
-layers.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+stage.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+stage.addEventListener('dblclick', (e) => e.preventDefault());
 
 cancelEdit.onclick = closeEditor;
 doneEdit.onclick = async () => {
